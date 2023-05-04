@@ -1,5 +1,19 @@
 package types
 
+const MinGasFee = 2000
+
+const MaxGasFee = 50000000000
+
+// 这在sui代码中定义
+var IntentFlag = []byte{0, 0, 0}
+
+type SignatureSchemeSerialized byte
+
+const (
+	SignatureSchemeSerializedEd25519   SignatureSchemeSerialized = 0
+	SignatureSchemeSerializedSecp256k1 SignatureSchemeSerialized = 1
+)
+
 type RequestTxType string
 
 const (
@@ -91,13 +105,7 @@ func (os ObjectStatus) String() string {
 	return string(os)
 }
 
-type TxStatus string
-
 const (
-	TxSuccess TxStatus = "success"
-	TxFailure TxStatus = "failure"
+	TxSuccess string = "success"
+	TxFailure string = "failure"
 )
-
-func (ts TxStatus) String() string {
-	return string(ts)
-}

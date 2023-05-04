@@ -1,204 +1,209 @@
 package types
 
-import "math/big"
+import (
+	"fmt"
+	"math/big"
+	"strconv"
+	"time"
+)
 
+type UnsignedTx struct {
+	TxBytes      string      `json:"txBytes"`
+	InputObjects interface{} `json:"inputObjects"`
+	Gas          interface{} `json:"gas"`
+}
+
+type SubmitTx struct {
+	EffectsCert Transaction `json:"EffectsCert"`
+}
+
+// --------------
 type Tx struct {
-	Sender    string   `json:"from"`
-	Recipient string   `json:"to"`
-	Amount    *big.Int `json:"amount"`
-	Gas       *big.Int `json:"gas"`
-	CoinType  CoinType `json:"coin_type"`
-	Height    uint64   `json:"height"`
-	Hash      string   `json:"hash"`
-	TxMethod  string   `json:"tx_method"`
+	Sender         string
+	Recipient      string
+	Amount         *big.Int
+	Gas            *big.Int
+	Hash           string
+	Checkpoint     uint64
+	Epoch          string
+	TxSignatures   []string
+	MessageVersion string
+	CoinType       CoinType
+	Time           time.Time
 }
 
-type Transaction struct {
-	Certificate             Certificate `json:"certificate"`
-	Effects                 Effects     `json:"effects"`
-	TimestampMs             interface{} `json:"timestamp_ms"`
-	ParsedData              interface{} `json:"parsed_data"`
-	ConfirmedLocalExecution bool        `json:"confirmed_local_execution"`
+type TransactionBlock struct {
+	Digest      string      `json:"digest"`
+	Transaction Transaction `json:"transaction"`
+	//RawTransaction string           `json:"rawTransaction"`
+	Effects Effects `json:"effects"`
+	//Events         []interface{}    `json:"events"`
+	//ObjectChanges  []ObjectChanges  `json:"objectChanges"`
+	BalanceChanges []BalanceChanges `json:"balanceChanges"`
+	TimestampMs    string           `json:"timestampMs"`
+	Checkpoint     string           `json:"checkpoint"`
 }
 
-func (t Transaction) Parse(index uint64) ([]Tx, error) {
-	var txes []Tx
-	if !t.Success() {
-		return txes, nil
+func (tb *TransactionBlock) Parse() ([]Tx, error) {
+	if tb.Effects.Status.Status != TxSuccess {
+		return nil, fmt.Errorf("tx fail: %v", tb.Effects.Status)
 	}
-	gasUsedBig := t.GasUsed()
-	txHash := t.Effects.TransactionDigest
-	sender := t.Certificate.Data.Sender
 
-	events := t.Effects.Events
-	var eventsByChangeType []Event
-	for _, event := range events {
-		if !event.ValidModule() {
+	checkPoint, err := strconv.ParseUint(tb.Checkpoint, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	gasUsed, err := tb.GetGasUsed()
+	if err != nil {
+		return nil, err
+	}
+	timestamp, err := strconv.ParseInt(tb.TimestampMs, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	txTimestamp := time.UnixMilli(timestamp)
+	var tmpList []BalanceChanges
+	for _, balChange := range tb.BalanceChanges {
+		amountBig, ok := big.NewInt(0).SetString(balChange.Amount, 10)
+		if !ok {
 			continue
 		}
-		if event.CoinBalanceChange.ChangeType == ReceiveChangeType && event.CoinBalanceChange.PackageID == SuiPackageId {
-			eventsByChangeType = append(eventsByChangeType, event)
+		if amountBig.Cmp(big.NewInt(0)) > 0 {
+			tmpList = append(tmpList, balChange)
 		}
 	}
-	if len(eventsByChangeType) == 0 {
-		return txes, nil
-	}
+	var txList []Tx
 
-	// todo
-	eventAddressMap := EventFilterByAddress(eventsByChangeType)
-
-	for recipient, eventList := range eventAddressMap {
-
-		eventCoinTypeMap := EventFilterByCoinType(*eventList)
-
-		for coinType, list := range eventCoinTypeMap {
-
-			amount := big.NewInt(0)
-			for _, item := range *list {
-				amount = big.NewInt(0).Add(amount, item.CoinBalanceChange.Amount)
-			}
-			tx := Tx{
-				Sender:    sender,
-				Recipient: recipient,
-				Amount:    amount,
-				Hash:      txHash,
-				CoinType:  coinType,
-				Gas:       gasUsedBig,
-				Height:    index,
-			}
-			txes = append(txes, tx)
+	for _, balChange := range tmpList {
+		amountBig, ok := big.NewInt(0).SetString(balChange.Amount, 10)
+		if !ok {
+			continue
 		}
-
-	}
-	return txes, nil
-
-}
-
-func EventFilterByAddress(eventList []Event) map[string]*[]Event {
-	addressMap := make(map[string]*[]Event)
-	for _, event := range eventList {
-		if list, ok := addressMap[event.CoinBalanceChange.Owner.AddressOwner]; ok {
-			*list = append(*list, event)
-		} else {
-			events := new([]Event)
-			*events = append(*events, event)
-			addressMap[event.CoinBalanceChange.Owner.AddressOwner] = events
+		tx := Tx{
+			Hash:           tb.Digest,
+			Checkpoint:     checkPoint,
+			TxSignatures:   tb.Transaction.TxSignatures,
+			Sender:         tb.Transaction.Data.Sender,
+			Gas:            gasUsed,
+			Epoch:          tb.Effects.ExecutedEpoch,
+			MessageVersion: tb.Effects.MessageVersion,
+			Recipient:      balChange.Owner.AddressOwner,
+			Amount:         amountBig,
+			CoinType:       CoinType(balChange.CoinType),
+			Time:           txTimestamp,
 		}
+		txList = append(txList, tx)
 	}
-	return addressMap
+	return txList, nil
 }
 
-func EventFilterByCoinType(eventList []Event) map[CoinType]*[]Event {
-	coinTypeMap := make(map[CoinType]*[]Event)
-	for _, event := range eventList {
-		if list, ok := coinTypeMap[event.CoinBalanceChange.CoinType]; ok {
-			*list = append(*list, event)
-		} else {
-			events := new([]Event)
-			*events = append(*events, event)
-			coinTypeMap[event.CoinBalanceChange.CoinType] = events
-		}
+func (tb *TransactionBlock) Status() Status {
+	return tb.Effects.Status
+
+}
+
+func (tb *TransactionBlock) GetGasUsed() (*big.Int, error) {
+	gasUsed := tb.Effects.GasUsed
+	totalBig := big.NewInt(0)
+	computationCost, ok := big.NewInt(0).SetString(gasUsed.ComputationCost, 10)
+	if !ok {
+		return totalBig, fmt.Errorf("gasused parse big error: %v", gasUsed)
 	}
-	return coinTypeMap
 
-}
-
-func (e Event) ValidModule() bool {
-	// todo
-	module := e.CoinBalanceChange.TransactionModule
-	if module == PayModule || module == PaySuiModule || module == PayAllSuiModule || module == TransferSuiModule || module == TransferObjectModule {
-		return true
+	totalBig = big.NewInt(0).Add(totalBig, computationCost)
+	storageCost, ok := big.NewInt(0).SetString(gasUsed.StorageCost, 10)
+	if !ok {
+		return totalBig, fmt.Errorf("gasused parse big error: %v", gasUsed)
 	}
-	return false
+	totalBig = big.NewInt(0).Add(totalBig, storageCost)
+
+	storageRebate, ok := big.NewInt(0).SetString(gasUsed.StorageRebate, 10)
+	if !ok {
+		return big.NewInt(0), fmt.Errorf("gasused parse big error: %v", gasUsed)
+	}
+	totalBig = big.NewInt(0).Sub(totalBig, storageRebate)
+
+	//nonRefundableStorageFee, ok := big.NewInt(0).SetString(gasUsed.NonRefundableStorageFee, 10)
+	//if !ok {
+	//	return totalBig, fmt.Errorf("gasused parse big error: %v", gasUsed)
+	//}
+	//totalBig = big.NewInt(0).Add(totalBig, nonRefundableStorageFee)
+	return totalBig, nil
+
 }
 
-func (t Transaction) GasUsed() *big.Int {
-	//tmpBig := big.NewInt(0).Add(t.Effects.GasUsed.ComputationCost, t.Effects.GasUsed.StorageRebate)
-	//gasUsed := big.NewInt(0).Add(tmpBig, t.Effects.GasUsed.StorageCost)
-	return t.Effects.GasUsed.ComputationCost
-}
-
-func (t Transaction) Success() bool {
-	return t.Effects.Status.Status == TxSuccess
-}
-
-type ObjectRef struct {
-	ObjectID string `json:"objectId"`
-	Version  uint64 `json:"version"`
-	Digest   string `json:"digest"`
-}
-
-type Pay struct {
-	Coins      []Coin     `json:"coins"`
-	Recipients []string   `json:"recipients"`
-	Amounts    []*big.Int `json:"amounts"`
-}
-
-type Coin struct {
-	ObjectID string `json:"objectId"`
-	Version  int    `json:"version"`
-	Digest   string `json:"digest"`
+type Inputs struct {
+	Type      string      `json:"type"`
+	ValueType string      `json:"valueType"`
+	Value     interface{} `json:"value"`
 }
 
 type Transactions struct {
-	TransferSui    TransferSui    `json:"TransferSui"`
-	TransferObject TransferObject `json:"transferObject"`
-	Pay            Pay            `json:"Pay"`
-	PaySui         Pay            `json:"PaySui"`
-	PayAllSui      Pay            `json:"PayAllSui"`
+	SplitCoins      []interface{} `json:"SplitCoins,omitempty"`
+	TransferObjects []interface{} `json:"TransferObjects,omitempty"`
 }
 
-type TransferSui struct {
-	Recipient string   `json:"recipient"`
-	Amount    *big.Int `json:"amount"`
+type DataTransaction struct {
+	Kind         string         `json:"kind"`
+	Inputs       []Inputs       `json:"inputs"`
+	Transactions []Transactions `json:"transactions"`
 }
 
-type GasPayment struct {
+type Payment struct {
 	ObjectID string `json:"objectId"`
 	Version  int    `json:"version"`
 	Digest   string `json:"digest"`
 }
 
+type GasData struct {
+	Payment []Payment `json:"payment"`
+	Owner   string    `json:"owner"`
+	Price   string    `json:"price"`
+	Budget  string    `json:"budget"`
+}
+
 type Data struct {
-	Transactions []Transactions `json:"transactions"`
-	Sender       string         `json:"sender"`
-	GasPayment   GasPayment     `json:"gasPayment"`
-	GasBudget    uint64         `json:"gasBudget"`
+	//MessageVersion string          `json:"messageVersion"`
+	//Transaction DataTransaction `json:"transaction"`
+	Sender  string  `json:"sender"`
+	GasData GasData `json:"gasData"`
 }
 
-type AuthSignInfo struct {
-	Epoch      int    `json:"epoch"`
-	Signature  string `json:"signature"`
-	SignersMap []int  `json:"signers_map"`
-}
-
-type Certificate struct {
-	TransactionDigest string       `json:"transactionDigest"`
-	Data              Data         `json:"data"`
-	TxSignature       string       `json:"txSignature"`
-	AuthSignInfo      AuthSignInfo `json:"authSignInfo"`
+type Transaction struct {
+	Data         Data     `json:"data"`
+	TxSignatures []string `json:"txSignatures"`
 }
 
 type Status struct {
-	Status TxStatus `json:"status"`
-	Error  string   `json:"error"`
+	Status string `json:"status"`
+	Error  string `json:"error"`
 }
 
 type GasUsed struct {
-	ComputationCost *big.Int `json:"computationCost"`
-	StorageCost     *big.Int `json:"storageCost"`
-	StorageRebate   *big.Int `json:"storageRebate"`
+	ComputationCost         string `json:"computationCost"`
+	StorageCost             string `json:"storageCost"`
+	StorageRebate           string `json:"storageRebate"`
+	NonRefundableStorageFee string `json:"nonRefundableStorageFee"`
+}
+
+type ModifiedAtVersions struct {
+	ObjectID       string `json:"objectId"`
+	SequenceNumber string `json:"sequenceNumber"`
 }
 
 type Owner struct {
 	AddressOwner string `json:"AddressOwner"`
-	ObjectOwner  string `json:"ObjectOwner"`
 }
 
 type Reference struct {
 	ObjectID string `json:"objectId"`
 	Version  int    `json:"version"`
 	Digest   string `json:"digest"`
+}
+
+type Created struct {
+	Owner     Owner     `json:"owner"`
+	Reference Reference `json:"reference"`
 }
 
 type Mutated struct {
@@ -211,89 +216,32 @@ type GasObject struct {
 	Reference Reference `json:"reference"`
 }
 
-type Recipient struct {
-	AddressOwner string `json:"AddressOwner"`
-}
-
-type TransferObject struct {
-	PackageID         string `json:"packageId"`
-	TransactionModule string `json:"transactionModule"`
-	Sender            string `json:"sender"`
-	//Recipient         Recipient `json:"recipient"`
-	ObjectType string    `json:"objectType"`
-	ObjectID   string    `json:"objectId"`
-	Version    int       `json:"version"`
-	Recipient  string    `json:"recipient"`
-	ObjectRef  ObjectRef `json:"objectRef"`
-}
-
-type Event struct {
-	TransferObject    TransferObject    `json:"transferObject"`
-	CoinBalanceChange CoinBalanceChange `json:"coinBalanceChange"`
-}
-
 type Effects struct {
-	Status            Status    `json:"status"`
-	GasUsed           GasUsed   `json:"gasUsed"`
-	TransactionDigest string    `json:"transactionDigest"`
-	Mutated           []Mutated `json:"mutated"`
-	GasObject         GasObject `json:"gasObject"`
-	Events            []Event   `json:"events"`
+	MessageVersion string  `json:"messageVersion"`
+	Status         Status  `json:"status"`
+	ExecutedEpoch  string  `json:"executedEpoch"`
+	GasUsed        GasUsed `json:"gasUsed"`
+	//ModifiedAtVersions []ModifiedAtVersions `json:"modifiedAtVersions"`
+	TransactionDigest string `json:"transactionDigest"`
+	//Created            []Created            `json:"created"`
+	//Mutated            []Mutated            `json:"mutated"`
+	//GasObject    GasObject `json:"gasObject"`
+	//Dependencies []string  `json:"dependencies"`
 }
 
-type CoinBalanceChange struct {
-	PackageID         PackageId  `json:"packageId"`
-	TransactionModule Module     `json:"transactionModule"`
-	Sender            string     `json:"sender"`
-	ChangeType        ChangeType `json:"changeType"`
-	Owner             Owner      `json:"owner"`
-	CoinType          CoinType   `json:"coinType"`
-	CoinObjectID      string     `json:"coinObjectId"`
-	Version           int        `json:"version"`
-	Amount            *big.Int   `json:"amount"`
+type ObjectChanges struct {
+	Type            string `json:"type"`
+	Sender          string `json:"sender"`
+	Owner           Owner  `json:"owner"`
+	ObjectType      string `json:"objectType"`
+	ObjectID        string `json:"objectId"`
+	Version         string `json:"version"`
+	PreviousVersion string `json:"previousVersion,omitempty"`
+	Digest          string `json:"digest"`
 }
 
-// object
-
-type ID struct {
-	ID string `json:"id"`
-}
-
-type Fields struct {
-	Balance *big.Int `json:"balance"`
-	ID      ID       `json:"id"`
-}
-
-type ObjectData struct {
-	DataType          string `json:"dataType"`
-	Type              string `json:"type"`
-	HasPublicTransfer bool   `json:"has_public_transfer"`
-	Fields            Fields `json:"fields"`
-}
-
-type Details struct {
-	Data                ObjectData `json:"data"`
-	Owner               Owner      `json:"owner"`
-	PreviousTransaction string     `json:"previousTransaction"`
-	StorageRebate       int        `json:"storageRebate"`
-	Reference           Reference  `json:"reference"`
-}
-
-type Object struct {
-	Status   ObjectStatus `json:"status"`
-	Details  Details      `json:"details"`
-	ObjectId string       `json:"objectId"`
-}
-
-//
-
-type UnsignedTx struct {
-	TxBytes      string      `json:"txBytes"`
-	InputObjects interface{} `json:"inputObjects"`
-	Gas          interface{} `json:"gas"`
-}
-
-//
-type SubmitTx struct {
-	EffectsCert Transaction `json:"EffectsCert"`
+type BalanceChanges struct {
+	Owner    Owner  `json:"owner"`
+	CoinType string `json:"coinType"`
+	Amount   string `json:"amount"`
 }

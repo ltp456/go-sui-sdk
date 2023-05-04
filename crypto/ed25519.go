@@ -3,13 +3,13 @@ package crypto
 import (
 	"crypto/ed25519"
 	"fmt"
-	"golang.org/x/crypto/sha3"
+	"golang.org/x/crypto/blake2b"
 )
 
 type KeyPair struct {
 	PrivateKey ed25519.PrivateKey
 	PublicKey  ed25519.PublicKey
-	AuthKey    []byte
+	AuthKey    [32]byte
 }
 
 func (kp *KeyPair) Type() KeyType {
@@ -21,25 +21,20 @@ func (kp *KeyPair) Address() string {
 }
 
 func (kp *KeyPair) Sign(data []byte) ([]byte, error) {
-	var prefixBytes []byte
-	signingMessage := append(prefixBytes, data...)
-	return ed25519.Sign(kp.PrivateKey, signingMessage), nil
+	return ed25519.Sign(kp.PrivateKey, data), nil
 }
 
 func NewKeyPairFromSeed(seed []byte) (*KeyPair, error) {
 	privateKey := ed25519.NewKeyFromSeed(seed[:])
 	publicKey := privateKey.Public().(ed25519.PublicKey)
-
-	hash := sha3.New256()
-	hash.Write([]byte{0x00})
-	hash.Write(publicKey)
-	hashSum := hash.Sum(nil)
-	key := make([]byte, 20)
-	copy(key, hashSum[:20])
+	data := make([]byte, 0)
+	data = append(data, []byte{0x00}...)
+	data = append(data, publicKey...)
+	hash := blake2b.Sum256(data)
 	return &KeyPair{
 		PrivateKey: privateKey,
 		PublicKey:  publicKey,
-		AuthKey:    key,
+		AuthKey:    hash,
 	}, nil
 }
 

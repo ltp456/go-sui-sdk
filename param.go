@@ -47,6 +47,12 @@ type Error struct {
 	Message string `json:"message"`
 }
 
+type MapParams map[string]interface{}
+
+func (mp *MapParams) SetKey(key string, value interface{}) {
+	(*mp)[key] = value
+}
+
 type Params []interface{}
 
 func (p *Params) AddValue(value interface{}) {
