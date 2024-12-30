@@ -4,8 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"go-sui-sdk/crypto"
-	"go-sui-sdk/types"
+	"github.com/ltp456/go-sui-sdk/crypto"
+	"github.com/ltp456/go-sui-sdk/types"
 	"math/big"
 	"testing"
 )
