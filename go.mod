@@ -1,4 +1,4 @@
-module go-sui-sdk
+module github.com/ltp456/go-sui-sdk
 
 go 1.18
 
